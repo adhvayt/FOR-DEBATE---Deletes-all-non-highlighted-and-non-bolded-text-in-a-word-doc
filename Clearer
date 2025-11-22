@@ -1,0 +1,105 @@
+#include <iostream>
+#include <zip.h>
+#include "tinyxml2.h"
+
+using namespace tinyxml2;
+using namespace std;
+
+bool extractFile(zip_t* za, const char* name, string& out) {
+    zip_file_t* f = zip_fopen(za, name, 0);
+    if (!f) return false;
+
+    char buf[4096];
+    int n;
+    while ((n = zip_fread(f, buf, sizeof(buf))) > 0)
+        out.append(buf, n);
+
+    zip_fclose(f);
+    return true;
+}
+
+int main() {
+    const char* inFile = "input.docx";
+    const char* outFile = "output.docx";
+
+    int err = 0;
+    zip_t* za = zip_open(inFile, ZIP_RDONLY, &err);
+    if (!za) {
+        cout << "Could not open docx.\n";
+        return 1;
+    }
+
+    string documentXML;
+    if (!extractFile(za, "word/document.xml", documentXML)) {
+        cout << "Could not extract document.xml\n";
+        return 1;
+    }
+    zip_close(za);
+
+    XMLDocument doc;
+    doc.Parse(documentXML.c_str());
+
+    XMLElement* root = doc.FirstChildElement("w:document")
+                           ->FirstChildElement("w:body");
+
+    // Traverse paragraphs
+    for (XMLElement* p = root->FirstChildElement("w:p"); p; p = p->NextSiblingElement("w:p")) {
+        vector<XMLElement*> toDelete;
+
+        // Traverse runs
+        for (XMLElement* r = p->FirstChildElement("w:r"); r; r = r->NextSiblingElement("w:r")) {
+            bool keep = false;
+            XMLElement* rPr = r->FirstChildElement("w:rPr");
+
+            if (rPr) {
+                if (rPr->FirstChildElement("w:b")) keep = true;
+                if (rPr->FirstChildElement("w:highlight")) keep = true;
+            }
+
+            if (!keep) toDelete.push_back(r);
+        }
+
+        // Delete all unwanted runs
+        for (XMLElement* r : toDelete)
+            p->DeleteChild(r);
+    }
+
+    // Save modified XML to memory
+    XMLPrinter printer;
+    doc.Print(&printer);
+    string newXML = printer.CStr();
+
+    // Create new zip
+    zip_t* zb = zip_open(outFile, ZIP_CREATE | ZIP_TRUNCATE, &err);
+    if (!zb) {
+        cout << "Could not create output.docx\n";
+        return 1;
+    }
+
+    // Add all original files except document.xml
+    zip_t* zOld = zip_open(inFile, ZIP_RDONLY, &err);
+    zip_int64_t num = zip_get_num_entries(zOld, 0);
+
+    for (zip_int64_t i = 0; i < num; i++) {
+        const char* name = zip_get_name(zOld, i, 0);
+        if (string(name) == "word/document.xml") continue;
+
+        zip_file_t* f = zip_fopen(zOld, name, 0);
+        if (!f) continue;
+
+        zip_source_t* src = zip_source_zip(zb, zOld, i, 0, 0, 0);
+        if (zip_file_add(zb, name, src, ZIP_FL_OVERWRITE) < 0)
+            zip_source_free(src);
+
+        zip_fclose(f);
+    }
+
+    // Add our modified XML
+    zip_source_t* src = zip_source_buffer(zb, newXML.c_str(), newXML.size(), 0);
+    zip_file_add(zb, "word/document.xml", src, ZIP_FL_OVERWRITE);
+
+    zip_close(zb);
+    zip_close(zOld);
+
+    cout << "Finished. Saved as: " << outFile << endl;
+}
